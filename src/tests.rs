@@ -1,5 +1,6 @@
 use crate::ext::OidExt;
 use crate::testrepo::TestRepo;
+use crate::Repo;
 use gitdag::dag::Set;
 
 #[test]
@@ -182,4 +183,133 @@ fn test_ast_repo() -> crate::Result<()> {
     let head = repo.revs(ast!(heads({ stack }))).unwrap();
     assert_eq!(repo.desc_set(&head), ["D"]);
     Ok(())
+}
+
+#[test]
+fn test_repo_open() {
+    let mut tr = TestRepo::new();
+    tr.drawdag("A--B--C");
+    tr.add_ref("refs/heads/master", tr.query_single_oid("C"));
+    // Open from .git path
+    let repo = Repo::open(tr.git_repo().path()).unwrap();
+    assert_eq!(
+        repo.revs("all()").unwrap().count().unwrap(),
+        3
+    );
+    assert_eq!(repo.revs("master").unwrap().count().unwrap(), 1);
+}
+
+#[test]
+fn test_repo_clone() {
+    // Build a "remote" repo with known commits
+    let mut remote = TestRepo::new();
+    remote.drawdag("A--B");
+    // Create a proper HEAD so the clone works
+    remote.add_ref("refs/heads/master", remote.query_single_oid("B"));
+
+    // Clone via local filesystem path
+    let url = remote
+        .git_repo()
+        .path()
+        .parent()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let clone_dir = tempfile::tempdir().unwrap();
+    let repo = Repo::clone(&url, clone_dir.path()).unwrap();
+
+    assert_eq!(repo.revs("all()").unwrap().count().unwrap(), 2);
+    assert_eq!(repo.revs("master").unwrap().count().unwrap(), 1);
+}
+
+#[test]
+fn test_repo_fetch() {
+    // Source repo with one commit
+    let mut remote = TestRepo::new();
+    remote.drawdag("A");
+    remote.add_ref("refs/heads/master", remote.query_single_oid("A"));
+    let url = remote
+        .git_repo()
+        .path()
+        .parent()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+
+    // Clone
+    let clone_dir = tempfile::tempdir().unwrap();
+    let mut repo = Repo::clone(&url, clone_dir.path()).unwrap();
+    assert_eq!(repo.revs("all()").unwrap().count().unwrap(), 1);
+
+    // Add a new commit to the remote
+    remote.drawdag("A--B");
+    remote.add_ref("refs/heads/master", remote.query_single_oid("B"));
+
+    // Before fetch, clone still sees only 1 commit
+    assert_eq!(repo.revs("all()").unwrap().count().unwrap(), 1);
+
+    // Fetch and verify new commit appears
+    repo.fetch("origin").unwrap();
+    assert_eq!(repo.revs("all()").unwrap().count().unwrap(), 2);
+}
+
+#[test]
+fn test_repo_fetch_all_remotes_default() {
+    // Test fetch with default refspecs on a multi-commit repo
+    let mut remote = TestRepo::new();
+    remote.drawdag("A--B--C");
+    remote.add_ref("refs/heads/master", remote.query_single_oid("C"));
+    let url = remote
+        .git_repo()
+        .path()
+        .parent()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+
+    let clone_dir = tempfile::tempdir().unwrap();
+    let mut repo = Repo::clone(&url, clone_dir.path()).unwrap();
+    assert_eq!(repo.revs("all()").unwrap().count().unwrap(), 3);
+
+    // Remote gets a new branch (D is a new root commit, not related to existing C)
+    remote.drawdag("D--E");
+    remote.add_ref("refs/heads/feature", remote.query_single_oid("E"));
+
+    repo.fetch("origin").unwrap();
+    assert_eq!(repo.revs("all()").unwrap().count().unwrap(), 5);
+    // The new branch should also be resolvable as a remote-tracking ref
+    assert!(repo.revs("origin/feature").is_ok());
+}
+
+#[test]
+fn test_repo_real() {
+    let clone_dir = tempfile::tempdir().unwrap();
+
+    // Use system git for clone so all user config (credential helpers,
+    // proxies, CA bundles) are respected.
+    let status = std::process::Command::new("git")
+        .args([
+            "clone",
+            "--quiet",
+            "https://github.com/AlanKSorata/code_mig_agent",
+            clone_dir.path().to_str().unwrap(),
+        ])
+        .status()
+        .expect("failed to run git clone");
+    assert!(status.success(), "git clone failed");
+
+    // Open via gitrevset and run queries against the cloned repo.
+    let repo = Repo::open(clone_dir.path()).unwrap();
+    let set = repo.revs("head()").unwrap();
+    let head_count = set.count().unwrap();
+    println!("head() count: {head_count}");
+    assert_eq!(head_count, 1, "AlanKSorata/code_mig_agent currently has 1 branch head");
+
+    let all = repo.revs("all()").unwrap();
+    let all_count = all.count().unwrap();
+    println!("all() count: {all_count}");
+    assert_eq!(all_count, 2, "AlanKSorata/code_mig_agent currently has 2 commits total");
 }

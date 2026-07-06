@@ -11,6 +11,7 @@ use gitdag::git2;
 use gitdag::GitDag;
 use once_cell::sync::OnceCell;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Mutex;
 
 /// Repo with extra states to support revset queries.
@@ -48,6 +49,105 @@ impl Repo {
         };
 
         Ok(result)
+    }
+
+    /// Open a git repository from a local path.
+    ///
+    /// Unlike [`open_from_env`](Self::open_from_env) which relies on the
+    /// current working directory or `GIT_DIR`, this method opens a repo
+    /// at the given path explicitly.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let git_repo = git2::Repository::open(path.as_ref())?;
+        Self::open_from_repo(Box::new(git_repo))
+    }
+
+    /// Clone a remote repository and open it with the revset engine.
+    ///
+    /// This clones the remote `url` to the local `path`, builds the
+    /// commit graph index, and returns a ready-to-use `Repo`.
+    ///
+    /// ```no_run
+    /// # fn main() -> gitrevset::Result<()> {
+    /// let repo = gitrevset::Repo::clone(
+    ///     "https://github.com/rust-lang/rust.git",
+    ///     "/tmp/rust-clone",
+    /// )?;
+    /// let set = repo.revs("head()")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn clone(url: &str, path: impl AsRef<Path>) -> Result<Self> {
+        // libgit2 does not read HTTP_PROXY / HTTPS_PROXY env vars,
+        // so forward them explicitly if set.
+        let proxy_url = std::env::var("HTTPS_PROXY")
+            .or_else(|_| std::env::var("https_proxy"))
+            .or_else(|_| std::env::var("HTTP_PROXY"))
+            .or_else(|_| std::env::var("http_proxy"))
+            .ok();
+
+        let mut callbacks = git2::RemoteCallbacks::new();
+        callbacks.credentials(|_url, username_from_url, allowed| {
+            if allowed.contains(git2::CredentialType::SSH_KEY) {
+                return git2::Cred::ssh_key_from_agent(
+                    username_from_url.unwrap_or("git"),
+                );
+            }
+            if allowed.contains(git2::CredentialType::USER_PASS_PLAINTEXT) {
+                // Return a no-credential error so libgit2 continues
+                // (some anonymous servers need this to proceed)
+            }
+            Err(git2::Error::from_str("no credentials available"))
+        });
+
+        let mut fetch_opts = git2::FetchOptions::new();
+        fetch_opts.remote_callbacks(callbacks);
+        if let Some(ref proxy_url) = proxy_url {
+            let mut proxy = git2::ProxyOptions::new();
+            proxy.url(proxy_url);
+            fetch_opts.proxy_options(proxy);
+        }
+
+        let mut builder = git2::build::RepoBuilder::new();
+        builder.fetch_options(fetch_opts);
+        let git_repo = builder.clone(url, path.as_ref())?;
+        Self::open_from_repo(Box::new(git_repo))
+    }
+
+    /// Fetch from a remote and refresh the commit graph index.
+    ///
+    /// After fetching, cached sets are cleared and the DAG index is
+    /// rebuilt to include newly fetched commits.
+    ///
+    /// ```no_run
+    /// # fn main() -> gitrevset::Result<()> {
+    /// let mut repo = gitrevset::Repo::open_from_env()?;
+    /// repo.fetch("origin")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn fetch(&mut self, remote_name: &str) -> Result<()> {
+        {
+            let mut remote = self.git_repo().find_remote(remote_name)?;
+            remote.fetch(&[] as &[&str], None, None)?;
+        }
+        // remote is dropped, releasing the immutable borrow on self
+        self.refresh_dag()
+    }
+
+    /// Rebuild the DAG index and invalidate caches after the git repo
+    /// has been changed (e.g., via `fetch`).
+    fn refresh_dag(&mut self) -> Result<()> {
+        let git_repo_path = self.git_repo().path().to_owned();
+        let main_branch = guess_main_branch_name(self.git_repo());
+        // Re-open the repo temporarily to rebuild the DAG index,
+        // avoiding a concurrent borrow with self.dag.
+        let temp_repo = git2::Repository::open(&git_repo_path)?;
+        let dag_path = git_repo_path.join("dag");
+        self.dag = GitDag::open_git_repo(&temp_repo, &dag_path, &main_branch)?;
+        self.cached_sets.lock().unwrap().clear();
+        self.cached_mutation_dag = OnceCell::new();
+        self.cached_eval_context = OnceCell::new();
+        Ok(())
     }
 
     /// Evaluate the expression. Return the resulting set.
