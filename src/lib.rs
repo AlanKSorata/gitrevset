@@ -77,6 +77,15 @@
 //! // Open from the current directory.
 //! let repo = gitrevset::Repo::open_from_env()?;
 //!
+//! // Open from an explicit path.
+//! let repo = gitrevset::Repo::open("/path/to/repo")?;
+//!
+//! // Clone a remote repository.
+//! let repo = gitrevset::Repo::clone(
+//!     "https://github.com/rust-lang/rust.git",
+//!     "/tmp/rust",
+//! )?;
+//!
 //! // Open from a libgit2 repository.
 //! let git_repo = git2::Repository::open(path)?;
 //! let repo = gitrevset::Repo::open_from_repo(Box::new(git_repo))?;
@@ -102,6 +111,18 @@
 //! // ex. git config revsetalias.foo "parents($1)"
 //! let set = repo.anyrevs("foo(.)")?;
 //! # }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! After a `fetch`, cached sets are cleared and the DAG index is rebuilt
+//! to include newly fetched commits:
+//!
+//! ```no_run
+//! # fn main() -> gitrevset::Result<()> {
+//! # let mut repo = gitrevset::Repo::open_from_env()?;
+//! repo.fetch("origin")?;
+//! let set = repo.revs("draft()")?;
 //! # Ok(())
 //! # }
 //! ```

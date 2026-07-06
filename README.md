@@ -36,12 +36,24 @@ Commits by "alice" or "bob" in the "dev" but not "master" branch:
 
 ### Using `gitrevset` Library
 
-Parse revset from a string at runtime. Execute it and iterate through the `Oid`s:
+**Open or clone a repository**, then run revset queries:
 
 ```rust
 use gitrevset::{Repo, SetExt};
 
+// Open from the current repository (GIT_DIR or cwd).
 let repo = Repo::open_from_env()?;
+
+// Open from an explicit path.
+let repo = Repo::open("/path/to/repo")?;
+
+// Clone a remote repository and build the commit graph index.
+let repo = Repo::clone("https://github.com/rust-lang/rust.git", "/tmp/rust")?;
+
+// Fetch updates from a remote and refresh the index.
+repo.fetch("origin")?;
+
+// Run revset queries.
 let set = repo.revs("(draft() & ::.)^ + .")?;
 for oid in set.to_oids()? {
     dbg!(oid?)
@@ -61,8 +73,28 @@ let head = repo.revs(ast!(heads({ stack })))?;
 
 ### Using `git-revs` CLI
 
+Query the current repository:
+
 ```bash
 git revs "(draft() & ::.)^ + ."
+```
+
+Query a repository at a specific path:
+
+```bash
+git revs --open /path/to/repo "head()"
+```
+
+Clone a remote repository and query it:
+
+```bash
+git revs --clone https://github.com/rust-lang/rust.git /tmp/rust "all()"
+```
+
+Fetch updates from a remote and re-run queries:
+
+```bash
+git revs --fetch origin "draft()"
 ```
 
 ### Configuration
